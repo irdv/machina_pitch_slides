@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Machina — Encrypted Pitch</title>
+<style>
+  :root{
+    --bg:#07090d;--ink:#f2f5fa;--muted:#8b95a7;--line:#1c2432;
+    --accent:#4cc9f0;--accent2:#7cf7c4;--warn:#ff6b6b;--card:#111826;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{min-height:100%}
+  body{
+    background:var(--bg);color:var(--ink);
+    font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .gate{
+    min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px 20px;
+  }
+  .panel{
+    width:min(520px,100%);background:var(--card);border:1px solid var(--line);
+    border-radius:16px;padding:32px 28px;
+  }
+  .brand{font-weight:800;letter-spacing:.28em;font-size:14px;margin-bottom:6px}
+  .brand span{color:var(--accent)}
+  .tag{font-size:11px;color:var(--muted);letter-spacing:.08em;margin-bottom:28px}
+  h1{font-size:22px;font-weight:700;margin-bottom:8px}
+  .lead{font-size:14px;color:var(--muted);line-height:1.55;margin-bottom:22px}
+  label{display:block;font-size:12px;color:var(--muted);letter-spacing:.06em;margin-bottom:8px}
+  textarea{
+    width:100%;min-height:140px;resize:vertical;background:#0a0f18;color:var(--ink);
+    border:1px solid var(--line);border-radius:10px;padding:12px 14px;
+    font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  textarea:focus{outline:none;border-color:#2f5a7a}
+  .row{display:flex;gap:10px;margin-top:18px;flex-wrap:wrap}
+  button,.file-btn{
+    background:linear-gradient(90deg,#1a3a52,#123047);color:var(--ink);
+    border:1px solid #2f5a7a;border-radius:999px;padding:11px 18px;
+    font-size:13px;font-weight:700;cursor:pointer;transition:opacity .15s;
+  }
+  button:hover,.file-btn:hover{opacity:.9}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .file-btn{display:inline-block;position:relative;overflow:hidden}
+  .file-btn input{position:absolute;inset:0;opacity:0;cursor:pointer}
+  .err{
+    margin-top:14px;padding:10px 12px;border-radius:8px;font-size:13px;line-height:1.45;
+    background:rgba(255,107,107,.08);border:1px solid #4a2230;color:#ffb4b4;display:none;
+  }
+  .err.show{display:block}
+  #viewer{display:none;position:fixed;inset:0;background:var(--bg)}
+  #viewer iframe{width:100%;height:100%;border:0;background:#fff}
+  .hint{margin-top:16px;font-size:11px;color:#4a5568;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="gate" id="gate">
+  <div class="panel">
+    <div class="brand">MA<span>CH</span>INA</div>
+    <div class="tag">ENCRYPTED PITCH · PRIVATE ACCESS</div>
+    <h1>Enter private key</h1>
+    <p class="lead">Paste the RSA private key you were given, or load <code>private.pem</code>. Decryption runs entirely in your browser — nothing is sent to a server.</p>
+    <label for="key">Private key (PEM)</label>
+    <textarea id="key" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----" spellcheck="false" autocomplete="off"></textarea>
+    <div class="row">
+      <button id="unlock" type="button">Unlock pitch</button>
+      <label class="file-btn">Load .pem file<input id="file" type="file" accept=".pem,.key,text/plain"></label>
+    </div>
+    <div class="err" id="err"></div>
+    <p class="hint">AES-256-GCM + RSA-OAEP-4096. Keep your private key confidential.</p>
+  </div>
+</div>
+<div id="viewer"><iframe id="frame" title="Machina pitch" sandbox="allow-scripts allow-same-origin"></iframe></div>
+
+<script>
+const b64ToBytes = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const pemToDer = (pem) => {
+  const body = pem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
+  return b64ToBytes(body);
+};
+
+async function importPrivateKey(pem) {
+  const trimmed = pem.trim();
+  if (!/BEGIN (RSA )?PRIVATE KEY/.test(trimmed)) {
+    throw new Error('Expected a PEM private key (PKCS#8 or RSA).');
+  }
+  const der = pemToDer(trimmed);
+  try {
+    return await crypto.subtle.importKey(
+      'pkcs8', der,
+      { name: 'RSA-OAEP', hash: 'SHA-256' },
+      false, ['decrypt']
+    );
+  } catch {
+    throw new Error('Invalid private key. Use the PKCS#8 PEM from private.pem.');
+  }
+}
+
+async function decryptPitch(pem) {
+  const res = await fetch('pitch.enc.json', { cache: 'no-store' });
+  if (!res.ok) throw new Error('Could not load pitch.enc.json');
+  const payload = await res.json();
+  if (payload.v !== 1) throw new Error('Unsupported payload version.');
+
+  const privateKey = await importPrivateKey(pem);
+  const wrapped = b64ToBytes(payload.wrapped_key);
+  const aesRaw = await crypto.subtle.decrypt({ name: 'RSA-OAEP' }, privateKey, wrapped);
+
+  const aesKey = await crypto.subtle.importKey(
+    'raw', aesRaw, { name: 'AES-GCM' }, false, ['decrypt']
+  );
+  const iv = b64ToBytes(payload.iv);
+  const ciphertext = b64ToBytes(payload.ciphertext);
+  const plainBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aesKey, ciphertext);
+  return new TextDecoder().decode(plainBuf);
+}
+
+const keyEl = document.getElementById('key');
+const errEl = document.getElementById('err');
+const unlockBtn = document.getElementById('unlock');
+
+function showError(msg) {
+  errEl.textContent = msg;
+  errEl.classList.add('show');
+}
+
+function clearError() {
+  errEl.textContent = '';
+  errEl.classList.remove('show');
+}
+
+async function unlock() {
+  clearError();
+  const pem = keyEl.value.trim();
+  if (!pem) { showError('Paste or load a private key first.'); return; }
+  unlockBtn.disabled = true;
+  unlockBtn.textContent = 'Decrypting…';
+  try {
+    const html = await decryptPitch(pem);
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    document.getElementById('frame').src = URL.createObjectURL(blob);
+    document.getElementById('gate').style.display = 'none';
+    document.getElementById('viewer').style.display = 'block';
+    document.title = 'Machina — Pitch';
+  } catch (e) {
+    showError(e.message || 'Decryption failed. Check your private key.');
+  } finally {
+    unlockBtn.disabled = false;
+    unlockBtn.textContent = 'Unlock pitch';
+  }
+}
+
+unlockBtn.addEventListener('click', unlock);
+document.getElementById('file').addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  keyEl.value = await file.text();
+  clearError();
+});
+keyEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) unlock();
+});
+</script>
+</body>
+</html>
